@@ -30,6 +30,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     select,
+    text as sql_text,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import (
@@ -110,6 +111,17 @@ class UserPref(Base):
     )
 
 
+class UserAuth(Base):
+    __tablename__ = "user_auth"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
+    is_authenticated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
 class GenerationLog(Base):
     __tablename__ = "generation_logs"
 
@@ -128,6 +140,14 @@ class GenerationLog(Base):
 async def init_db() -> None:
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+async def acquire_singleton_lock(lock_key: int = 987654321) -> bool:
+    """Пытается получить advisory lock в Postgres. Возвращает True, если замок получен."""
+    async with async_engine.connect() as conn:
+        result = await conn.execute(sql_text("SELECT pg_try_advisory_lock(:k)"), {"k": lock_key})
+        value = result.scalar()
+        return bool(value)
 
 
 async def db_set_pref(user_id: int, key: str, value: Any) -> None:
@@ -154,6 +174,31 @@ async def db_get_prefs(user_id: int) -> dict:
         )
         rows = result.all()
         return {k: v for (k, v) in rows}
+
+
+async def db_set_auth(user_id: int, is_authed: bool) -> None:
+    now_dt = datetime.now(timezone.utc)
+    async with AsyncSessionMaker() as session:
+        stmt = pg_insert(UserAuth).values(
+            user_id=user_id,
+            is_authenticated=1 if is_authed else 0,
+            updated_at=now_dt,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[UserAuth.__table__.c.user_id],
+            set_={"is_authenticated": (1 if is_authed else 0), "updated_at": now_dt},
+        )
+        await session.execute(stmt)
+        await session.commit()
+
+
+async def db_is_authed(user_id: int) -> bool:
+    async with AsyncSessionMaker() as session:
+        result = await session.execute(
+            select(UserAuth.is_authenticated).where(UserAuth.user_id == user_id)
+        )
+        row = result.first()
+        return bool(row and row[0] == 1)
 
 
 async def db_log_generation(
@@ -289,6 +334,24 @@ async def ensure_prefs_loaded(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["prefs_loaded"] = True
 
 
+async def ensure_authenticated(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user = update.effective_user
+    if not user:
+        return False
+    # проверяем из кеша
+    if context.user_data.get("is_authed") is True:
+        return True
+    # проверяем в БД
+    if await db_is_authed(user.id):
+        context.user_data["is_authed"] = True
+        return True
+    # не авторизован — подсказка
+    await (update.effective_message or update.message).reply_text(
+        "Требуется авторизация. Введите: /login <пароль>"
+    )
+    return False
+
+
 # === Пресеты ===
 
 def preset_human_name(key: str) -> str:
@@ -324,6 +387,8 @@ async def apply_preset(update: Update, context: ContextTypes.DEFAULT_TYPE, prese
 
 
 async def cmd_presets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_authenticated(update, context):
+        return
     # Список пресетов с кнопками
     rows = []
     row: list[InlineKeyboardButton] = []
@@ -339,6 +404,8 @@ async def cmd_presets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_preset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_authenticated(update, context):
+        return
     args = (update.message.text or "").split(maxsplit=1)
     if len(args) < 2:
         await update.message.reply_text("Использование: /preset <имя>. Список: /presets")
@@ -348,6 +415,8 @@ async def cmd_preset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_authenticated(update, context):
+        return
     q = update.callback_query
     if not q or not q.data:
         return
@@ -421,6 +490,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Отправьте текстовый промпт (и при желании параметры), и я сгенерирую изображение.\n\n"
         "Также можно отправить фото с подписью (caption) — сделаю img2img.\n\n"
         "Команды настроек: \n"
+        "/login <пароль> — авторизация (по умолчанию ss1234, можно изменить в .env).\n"
         "/presets — выбрать готовый пресет под площадку.\n"
         "/preset <имя> — применить пресет по имени (см. /presets).\n"
         "/config — показать текущие настройки.\n"
@@ -455,6 +525,8 @@ def parse_parameters(text: str) -> tuple[str, dict]:
 
 
 async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_authenticated(update, context):
+        return
     await ensure_prefs_loaded(update, context)
     prefs = get_user_prefs(context)
     effective = dict(DEFAULTS)
@@ -467,6 +539,8 @@ async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_authenticated(update, context):
+        return
     await ensure_prefs_loaded(update, context)
     # Поддерживаем 2 формата: /set key value  ИЛИ  /set key: value
     args_text = (update.message.text or "").split(maxsplit=1)
@@ -507,6 +581,8 @@ async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_authenticated(update, context):
+        return
     context.user_data.pop("prefs", None)
     context.user_data.pop("prefs_loaded", None)
     await update.message.reply_text("Сохранённые настройки сброшены (в контексте). Чтобы очистить их в БД, используйте /set для перезаписи или вручную очистите таблицу.")
@@ -520,6 +596,8 @@ def replicate_run_sync(inputs: dict):
 
 
 async def generate_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, user_params: dict, image_url: str | None = None) -> None:
+    if not await ensure_authenticated(update, context):
+        return
     await ensure_prefs_loaded(update, context)
     chat_id = update.effective_chat.id
     tasks = await send_typing_animation(context, chat_id)
@@ -591,6 +669,8 @@ async def generate_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_authenticated(update, context):
+        return
     text = update.message.text or ""
     prompt, params = parse_parameters(text)
     if not prompt:
@@ -600,6 +680,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_authenticated(update, context):
+        return
     if not update.message or not update.message.photo:
         return
     # Берем самое большое превью
@@ -613,14 +695,39 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await generate_and_send(update, context, prompt, params, image_url=file_url)
 
 
+async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    args = (update.message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text("Использование: /login <пароль>")
+        return
+    password = args[1].strip()
+    if password == (config.AUTH_PASSWORD or ""):
+        if user:
+            await db_set_auth(user.id, True)
+        context.user_data["is_authed"] = True
+        await update.message.reply_text("Авторизация успешна. Можете продолжать.")
+    else:
+        await update.message.reply_text("Неверный пароль. Попробуйте ещё раз.")
+
+
 def main() -> None:
     if not config.TELEGRAM_BOT_TOKEN:
         raise RuntimeError("Не задан TELEGRAM_BOT_TOKEN в .env или окружении")
     if not config.REPLICATE_API_TOKEN:
         raise RuntimeError("Не задан REPLICATE_API_TOKEN в .env или окружении")
 
-    # Инициализация БД (создание таблиц)
-    asyncio.run(init_db())
+    # Инициализация БД (создание таблиц) и попытка стать единственным экземпляром
+    async def _bootstrap() -> bool:
+        await init_db()
+        return await acquire_singleton_lock()
+
+    got_lock = asyncio.run(_bootstrap())
+    if not got_lock:
+        logger.error(
+            "Другой экземпляр уже запущен (advisory lock не получен). Завершение работы, чтобы предотвратить 409 Conflict."
+        )
+        return
 
     # В Python 3.13 get_event_loop() может падать, если цикл не создан.
     # Создадим новый event loop для run_polling, если текущего нет.
@@ -633,6 +740,7 @@ def main() -> None:
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).concurrent_updates(True).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("login", cmd_login))
     app.add_handler(CommandHandler("presets", cmd_presets))
     app.add_handler(CommandHandler("preset", cmd_preset))
     app.add_handler(CommandHandler("config", cmd_config))
