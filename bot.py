@@ -6,13 +6,14 @@ from datetime import datetime, timezone
 from typing import List, Any
 
 import replicate
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     ContextTypes,
+    CallbackQueryHandler,
     filters,
 )
 
@@ -67,6 +68,18 @@ ALLOWED_KEYS = {
     "prompt_strength",
     "num_inference_steps",
     "disable_safety_checker",
+}
+
+# Пресеты для быстрого выбора под площадки
+PRESETS: dict[str, dict[str, Any]] = {
+    "instagram_square": {"aspect_ratio": "1:1", "output_format": "jpg", "output_quality": 95, "guidance": 2.5, "megapixels": "1"},
+    "instagram_story": {"aspect_ratio": "9:16", "output_format": "jpg", "output_quality": 95, "guidance": 2.5, "megapixels": "1"},
+    "youtube_thumbnail": {"aspect_ratio": "16:9", "output_format": "jpg", "output_quality": 95, "guidance": 3.0, "megapixels": "1"},
+    "tiktok_vertical": {"aspect_ratio": "9:16", "output_format": "jpg", "output_quality": 95, "guidance": 2.5},
+    "pinterest_pin": {"aspect_ratio": "2:3", "output_format": "jpg", "output_quality": 95, "guidance": 2.5},
+    "x_post_4_5": {"aspect_ratio": "4:5", "output_format": "jpg", "output_quality": 95, "guidance": 2.5},
+    "x_post_16_9": {"aspect_ratio": "16:9", "output_format": "jpg", "output_quality": 95, "guidance": 2.5},
+    "reels_vertical": {"aspect_ratio": "9:16", "output_format": "jpg", "output_quality": 95, "guidance": 2.5},
 }
 
 MODEL_ID = "black-forest-labs/flux-krea-dev"
@@ -276,6 +289,76 @@ async def ensure_prefs_loaded(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["prefs_loaded"] = True
 
 
+# === Пресеты ===
+
+def preset_human_name(key: str) -> str:
+    mapping = {
+        "instagram_square": "Instagram (квадрат)",
+        "instagram_story": "Instagram (сториз 9:16)",
+        "youtube_thumbnail": "YouTube Thumbnail (16:9)",
+        "tiktok_vertical": "TikTok (9:16)",
+        "pinterest_pin": "Pinterest Pin (2:3)",
+        "x_post_4_5": "X/Twitter (4:5)",
+        "x_post_16_9": "X/Twitter (16:9)",
+        "reels_vertical": "Reels (9:16)",
+    }
+    return mapping.get(key, key)
+
+
+async def apply_preset(update: Update, context: ContextTypes.DEFAULT_TYPE, preset_name: str) -> None:
+    await ensure_prefs_loaded(update, context)
+    preset = PRESETS.get(preset_name)
+    if not preset:
+        await update.effective_message.reply_text("Неизвестный пресет. Используйте /presets для списка.")
+        return
+    user = update.effective_user
+    filtered = filter_allowed_keys(preset)
+    # Сохраняем все пары ключ-значение
+    if user:
+        for k, v in filtered.items():
+            await db_set_pref(user.id, k, v)
+            set_user_pref(context, k, v)
+    await update.effective_message.reply_text(
+        f"Применён пресет: {preset_human_name(preset_name)}\n\n" + prefs_to_text(filtered)
+    )
+
+
+async def cmd_presets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Список пресетов с кнопками
+    rows = []
+    row: list[InlineKeyboardButton] = []
+    for idx, name in enumerate(PRESETS.keys(), start=1):
+        row.append(InlineKeyboardButton(preset_human_name(name), callback_data=f"preset:{name}"))
+        if idx % 2 == 0:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    kb = InlineKeyboardMarkup(rows)
+    await update.message.reply_text("Выберите пресет:", reply_markup=kb)
+
+
+async def cmd_preset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = (update.message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text("Использование: /preset <имя>. Список: /presets")
+        return
+    name = args[1].strip()
+    await apply_preset(update, context, name)
+
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q or not q.data:
+        return
+    if q.data.startswith("preset:"):
+        name = q.data.split(":", 1)[1]
+        await q.answer()
+        # Применяем и отвечаем в том же чате
+        await apply_preset(update, context, name)
+        return
+
+
 async def send_typing_animation(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     """Показывает в чате анимацию генерации (длительный typing + спиннер-сообщение)."""
     # Постоянный чат-экшен typing
@@ -338,6 +421,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Отправьте текстовый промпт (и при желании параметры), и я сгенерирую изображение.\n\n"
         "Также можно отправить фото с подписью (caption) — сделаю img2img.\n\n"
         "Команды настроек: \n"
+        "/presets — выбрать готовый пресет под площадку.\n"
+        "/preset <имя> — применить пресет по имени (см. /presets).\n"
         "/config — показать текущие настройки.\n"
         "/set <ключ> <значение> — сохранить настройку (например: /set aspect_ratio 16:9).\n"
         "/reset — сбросить сохранённые настройки.\n\n"
@@ -548,10 +633,13 @@ def main() -> None:
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).concurrent_updates(True).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("presets", cmd_presets))
+    app.add_handler(CommandHandler("preset", cmd_preset))
     app.add_handler(CommandHandler("config", cmd_config))
     app.add_handler(CommandHandler("settings", cmd_config))
     app.add_handler(CommandHandler("set", cmd_set))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
