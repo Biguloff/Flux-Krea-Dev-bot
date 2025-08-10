@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: tg-bot-postgres
+    environment:
+      POSTGRES_DB: tg_bot
+      POSTGRES_USER: tg
+      POSTGRES_PASSWORD: tg
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tg -d tg_bot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  bot:
+    build: .
+    container_name: tg-bot-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Переопределим DATABASE_URL, чтобы указывать на контейнер db
+      DATABASE_URL: postgresql+asyncpg://tg:tg@db:5432/tg_bot
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db_data:

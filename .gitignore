@@ -1,0 +1,118 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Python byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+cover/
+htmlcov/
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+# Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+__pypackages__/
+
+# Type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# Editors / IDE
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+bot.log
+
+# SQLite / local DBs
+*.sqlite3
+*.db
+*.db-journal
+
+# Sphinx / docs
+docs/_build/
+site/
+
+# Scrapy
+.scrapy/
+
+# Flask
+instance/
+.webassets-cache/
+
+# Rope / Spyder
+.ropeproject/
+.spyderproject
+.spyproject
+
+# Docker
+.dockerignore
+
+# Env & secrets (keep example files)
+.env
+.env.*
+.env.local
+.env.*.local
+!.env.example
+
+# Local data
+/data/
+.tmp/
