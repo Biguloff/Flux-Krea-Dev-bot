@@ -15,4 +15,4 @@ DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql+asyncpg://localhost/tg
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
 # Аутентификация (простой пароль)
-AUTH_PASSWORD: str = os.getenv("AUTH_PASSWORD", "ss1234")
+AUTH_PASSWORD: str = os.getenv("AUTH_PASSWORD", "ss1111ss")
